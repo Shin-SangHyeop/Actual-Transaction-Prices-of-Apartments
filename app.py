@@ -164,9 +164,19 @@ def make_kakao_messages(results, queried_on=None, months=3, max_chars=200):
 
     counts = {kind: len(rows) for kind, rows in grouped.items()}
     total = sum(counts.values())
+    all_dates = [transaction_date for rows in grouped.values()
+                 for transaction_date, _name, _detail in rows]
+    period_start = min(all_dates) if all_dates else start_date
+    period_end = max(all_dates) if all_dates else queried_on
+    if period_start.year == period_end.year:
+        period = f"{period_start.year}년 {period_start.month}월 ~ {period_end.month}월"
+    else:
+        period = (f"{period_start.year}년 {period_start.month}월 ~ "
+                  f"{period_end.year}년 {period_end.month}월")
+    title = apartments[0][0] if len(apartments) == 1 else "관심 아파트"
     header = f"총 거래 {total}건 | 매매 {counts['매매']} | 전세 {counts['전세']} | 월세 {counts['월세']}"
     messages = []
-    current = [header]
+    current = [title, period, header]
     for kind in ("매매", "전세", "월세"):
         latest = sorted(grouped[kind], key=lambda item: item[0], reverse=True)
         if not latest:
@@ -179,7 +189,7 @@ def make_kakao_messages(results, queried_on=None, months=3, max_chars=200):
             price = parts[2] if len(parts) > 2 else "금액 미상"
             price = price.replace("보증금 ", "").replace(" / 월 ", "/")
             prefix = f"{name} " if include_name else ""
-            day_text = f"{transaction_date.month}월 {transaction_date.day}일"
+            day_text = f"{transaction_date.month}/{transaction_date.day}"
             line = f"{prefix}{day_text} {area} {price}"
             chunks = split_kakao_line(line, max_chars - len(heading) - 1)
             if not heading_added:
