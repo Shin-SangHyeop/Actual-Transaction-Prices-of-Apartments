@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.log
+.venv/
+reports/
+dist/
+build/
+*.spec
+
+# User-specific API key and apartment list
+user_settings.yaml
