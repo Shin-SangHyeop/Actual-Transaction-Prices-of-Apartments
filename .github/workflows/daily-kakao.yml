@@ -38,7 +38,7 @@ jobs:
 
       - name: Fetch transactions and send Kakao messages
         env:
-          APP_SETTINGS_YAML: ${{ secrets.APP_SETTINGS_YAML }}
+          APP_SETTINGS_YAML_B64: ${{ secrets.APP_SETTINGS_YAML_B64 }}
           KAKAO_STATE_KEY: ${{ secrets.KAKAO_STATE_KEY }}
         run: python daily_sender.py
 
