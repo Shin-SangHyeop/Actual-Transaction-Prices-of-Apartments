@@ -173,6 +173,7 @@ def make_kakao_messages(results, queried_on=None, months=3, max_chars=200):
     else:
         period = (f"{period_start.year}년 {period_start.month}월 ~ "
                   f"{period_end.year}년 {period_end.month}월")
+    period += " / 전용면적 기준"
     title = apartments[0][0] if len(apartments) == 1 else "관심 아파트"
     header = f"총 거래 {total}건 | 매매 {counts['매매']} | 전세 {counts['전세']} | 월세 {counts['월세']}"
     messages = []
