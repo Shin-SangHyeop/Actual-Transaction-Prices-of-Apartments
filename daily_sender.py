@@ -11,6 +11,10 @@ from cryptography.fernet import Fernet, InvalidToken
 import app
 from messaging import send_kakao_memo
 
+for stream in (sys.stdout, sys.stderr):
+    if hasattr(stream, "reconfigure"):
+        stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+
 
 ROOT = Path(__file__).resolve().parent
 STATE_FILE = ROOT / "private-state" / "user_settings.enc"
@@ -76,8 +80,8 @@ def main():
             app.write_user_config(user_cfg)
 
         messages = app.make_kakao_messages(results, queried_on=today, months=3)
-        result = send_kakao_memo(kakao, messages, on_tokens=persist_tokens)
-        print(f"Kakao report sent successfully ({result}).")
+        send_kakao_memo(kakao, messages, on_tokens=persist_tokens)
+        print(f"Kakao report sent successfully ({len(messages)} message(s)).")
         return 0
     except Exception as exc:
         # Avoid writing API URLs or credential-bearing request details to public logs.
