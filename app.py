@@ -124,8 +124,36 @@ class FetchRows(list):
         self.api_status = api_status or {}
 
 
+def split_kakao_messages(lines, max_chars=200):
+    """Pack complete report lines into Kakao messages within the API limit."""
+    if max_chars < 1:
+        raise ValueError("max_chars must be positive")
+    messages = []
+    current = ""
+    for line in lines:
+        line = str(line)
+        while line:
+            separator = "\n" if current else ""
+            available = max_chars - len(current) - len(separator)
+            if len(line) <= available:
+                current += separator + line
+                break
+            if current:
+                messages.append(current)
+                current = ""
+                continue
+            split_at = line.rfind(" ", 0, max_chars + 1)
+            if split_at < max_chars // 2:
+                split_at = max_chars
+            messages.append(line[:split_at])
+            line = line[split_at:].lstrip()
+    if current:
+        messages.append(current)
+    return messages
+
+
 def make_kakao_messages(results, queried_on=None, months=3, max_chars=200):
-    """Build one <=200-character memo with sale transactions given priority."""
+    """Build Kakao memo messages with sales first and each message <=200 chars."""
     queried_on = queried_on or date.today()
     start_date = lookback_start(months, queried_on)
     apartments = [(name, rows) for name, rows in results]
@@ -160,10 +188,8 @@ def make_kakao_messages(results, queried_on=None, months=3, max_chars=200):
             prefix = f"{name} " if include_name else ""
             day_text = f"{transaction_date.month}월 {transaction_date.day}일"
             line = f"{prefix}{kind}: {day_text} {area} {price}"
-            candidate = "\n".join(lines + [line])
-            if len(candidate) <= max_chars:
-                lines.append(line)
-    return ["\n".join(lines)]
+            lines.append(line)
+    return split_kakao_messages(lines, max_chars=max_chars)
 
 
 def fetch(apartment, months, key, today=None):
