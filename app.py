@@ -124,32 +124,19 @@ class FetchRows(list):
         self.api_status = api_status or {}
 
 
-def split_kakao_messages(lines, max_chars=200):
-    """Pack complete report lines into Kakao messages within the API limit."""
-    if max_chars < 1:
-        raise ValueError("max_chars must be positive")
-    messages = []
-    current = ""
-    for line in lines:
-        line = str(line)
-        while line:
-            separator = "\n" if current else ""
-            available = max_chars - len(current) - len(separator)
-            if len(line) <= available:
-                current += separator + line
-                break
-            if current:
-                messages.append(current)
-                current = ""
-                continue
-            split_at = line.rfind(" ", 0, max_chars + 1)
-            if split_at < max_chars // 2:
-                split_at = max_chars
-            messages.append(line[:split_at])
-            line = line[split_at:].lstrip()
-    if current:
-        messages.append(current)
-    return messages
+def split_kakao_line(line, max_chars):
+    """Split an unusually long transaction line without losing its text."""
+    chunks = []
+    line = str(line)
+    while len(line) > max_chars:
+        split_at = line.rfind(" ", 0, max_chars + 1)
+        if split_at < max_chars // 2:
+            split_at = max_chars
+        chunks.append(line[:split_at])
+        line = line[split_at:].lstrip()
+    if line:
+        chunks.append(line)
+    return chunks
 
 
 def make_kakao_messages(results, queried_on=None, months=3, max_chars=200):
@@ -177,19 +164,40 @@ def make_kakao_messages(results, queried_on=None, months=3, max_chars=200):
 
     counts = {kind: len(rows) for kind, rows in grouped.items()}
     total = sum(counts.values())
-    lines = [f"총 거래 {total}건 | 매매 {counts['매매']} | 전세 {counts['전세']} | 월세 {counts['월세']}"]
+    header = f"총 거래 {total}건 | 매매 {counts['매매']} | 전세 {counts['전세']} | 월세 {counts['월세']}"
+    messages = []
+    current = [header]
     for kind in ("매매", "전세", "월세"):
         latest = sorted(grouped[kind], key=lambda item: item[0], reverse=True)
+        if not latest:
+            continue
+        heading = f"[{kind}]"
+        heading_added = False
         for transaction_date, name, detail in latest:
             parts = [part.strip() for part in detail.split("|")]
-            area = parts[1].split("(", 1)[0].strip() if len(parts) > 1 else "면적 미상"
+            area = parts[1].replace("㎡ (", "㎡(").strip() if len(parts) > 1 else "면적 미상"
             price = parts[2] if len(parts) > 2 else "금액 미상"
             price = price.replace("보증금 ", "").replace(" / 월 ", "/")
             prefix = f"{name} " if include_name else ""
             day_text = f"{transaction_date.month}월 {transaction_date.day}일"
-            line = f"{prefix}{kind}: {day_text} {area} {price}"
-            lines.append(line)
-    return split_kakao_messages(lines, max_chars=max_chars)
+            line = f"{prefix}{day_text} {area} {price}"
+            chunks = split_kakao_line(line, max_chars - len(heading) - 1)
+            if not heading_added:
+                if len("\n".join(current + [heading, chunks[0]])) > max_chars:
+                    messages.append("\n".join(current))
+                    current = [heading]
+                else:
+                    current.append(heading)
+                heading_added = True
+            for chunk in chunks:
+                if len("\n".join(current + [chunk])) <= max_chars:
+                    current.append(chunk)
+                else:
+                    messages.append("\n".join(current))
+                    current = [heading, chunk]
+    if current:
+        messages.append("\n".join(current))
+    return messages
 
 
 def fetch(apartment, months, key, today=None):
