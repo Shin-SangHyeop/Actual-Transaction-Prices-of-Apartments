@@ -16,6 +16,8 @@ concurrency:
 jobs:
   send:
     runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"
     steps:
       - name: Check out application
         uses: actions/checkout@v4
