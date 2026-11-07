@@ -1,6 +1,6 @@
 import json, queue, subprocess, threading, urllib.error, urllib.parse, urllib.request, xml.etree.ElementTree as ET
 import yaml
-from messaging import MessageSendError, send_lms, split_lms_text
+from messaging import MessageSendError, authorize_kakao, send_kakao_memo, send_lms, split_lms_text
 from datetime import date
 from calendar import monthrange
 from pathlib import Path
@@ -21,22 +21,27 @@ def read_config():
     if not CONFIG.exists():
         write_config(DEFAULT)
     app_cfg = json.loads(CONFIG.read_text(encoding="utf-8-sig"))
-    if USER_CONFIG.exists():
-        user_cfg = yaml.safe_load(USER_CONFIG.read_text(encoding="utf-8-sig")) or {}
-    else:
-        user_cfg = {}
+    # Create the per-user file on first launch. The repository may contain an
+    # existing settings.conf while user_settings.yaml is intentionally absent.
+    if not USER_CONFIG.exists():
+        write_user_config({})
+    user_cfg = yaml.safe_load(USER_CONFIG.read_text(encoding="utf-8-sig")) or {}
     cfg = {**DEFAULT, **app_cfg}
     cfg["apartments"] = user_cfg.get("apartments", [])
     cfg["molit_service_key"] = user_cfg.get("molit_service_key", "")
     cfg["solapi"] = user_cfg.get("solapi", {})
+    cfg["kakao"] = user_cfg.get("kakao", {})
     return cfg
 
 def write_config(cfg):
-    app_cfg = {k: v for k, v in cfg.items() if k not in ("apartments", "molit_service_key", "solapi")}
+    app_cfg = {k: v for k, v in cfg.items() if k not in ("apartments", "molit_service_key", "solapi", "kakao")}
     user_cfg = {"molit_service_key": cfg.get("molit_service_key", ""),
                 "apartments": cfg.get("apartments", []),
-                "solapi": cfg.get("solapi", {})}
+                "solapi": cfg.get("solapi", {}), "kakao": cfg.get("kakao", {})}
     CONFIG.write_text(json.dumps(app_cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    write_user_config(user_cfg)
+
+def write_user_config(user_cfg):
     USER_CONFIG.write_text(yaml.safe_dump(user_cfg, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
 def lookback_start(months, today=None):
@@ -117,6 +122,48 @@ class FetchRows(list):
     def __init__(self, rows=(), api_status=None):
         super().__init__(rows)
         self.api_status = api_status or {}
+
+
+def make_kakao_messages(results, queried_on=None, months=3, max_chars=200):
+    """Build one <=200-character memo with sale transactions given priority."""
+    queried_on = queried_on or date.today()
+    start_date = lookback_start(months, queried_on)
+    apartments = [(name, rows) for name, rows in results]
+    include_name = len(apartments) > 1
+    grouped = {"매매": [], "전세": [], "월세": []}
+    for name, rows in apartments:
+        for day, kind, detail in rows:
+            if kind not in grouped:
+                continue
+            raw_day = str(day).strip()
+            try:
+                transaction_date = date.fromisoformat(raw_day)
+            except ValueError:
+                if len(raw_day) == 6 and raw_day.isdigit():
+                    transaction_date = date(int(raw_day[:4]), int(raw_day[4:]), 1)
+                else:
+                    continue
+            if not start_date <= transaction_date <= queried_on:
+                continue
+            grouped[kind].append((transaction_date, name, detail))
+
+    counts = {kind: len(rows) for kind, rows in grouped.items()}
+    total = sum(counts.values())
+    lines = [f"총 거래 {total}건 | 매매 {counts['매매']} | 전세 {counts['전세']} | 월세 {counts['월세']}"]
+    for kind in ("매매", "전세", "월세"):
+        latest = sorted(grouped[kind], key=lambda item: item[0], reverse=True)
+        for transaction_date, name, detail in latest:
+            parts = [part.strip() for part in detail.split("|")]
+            area = parts[1].split("(", 1)[0].strip() if len(parts) > 1 else "면적 미상"
+            price = parts[2] if len(parts) > 2 else "금액 미상"
+            price = price.replace("보증금 ", "").replace(" / 월 ", "/")
+            prefix = f"{name} " if include_name else ""
+            day_text = f"{transaction_date.month}월 {transaction_date.day}일"
+            line = f"{prefix}{kind}: {day_text} {area} {price}"
+            candidate = "\n".join(lines + [line])
+            if len(candidate) <= max_chars:
+                lines.append(line)
+    return ["\n".join(lines)]
 
 
 def fetch(apartment, months, key, today=None):
@@ -305,9 +352,9 @@ class App:
         ttk.Button(primary, text="보고서 저장", command=self.save_report).pack(side="left", padx=(8, 0))
         tools = ttk.Frame(top, style="App.TFrame")
         tools.pack(fill="x")
+        ttk.Button(tools, text="카카오 설정", command=self.configure_kakao).pack(side="left", padx=(7, 0))
         ttk.Button(tools, text="API 키 설정", command=self.configure_api_key).pack(side="left")
-        ttk.Button(tools, text="LMS 설정", command=self.configure_lms).pack(side="left", padx=(7, 0))
-        self.send_button = ttk.Button(tools, text="보고서 발송", command=self.send_report)
+        self.send_button = ttk.Button(tools, text="카카오톡 전송", command=self.send_report)
         self.send_button.pack(side="left", padx=(7, 0))
         self.shutdown_var = tk.BooleanVar(value=self.cfg.get("shutdown_after_send", False))
         ttk.Checkbutton(tools, text="발송 후 컴퓨터 종료", variable=self.shutdown_var,
@@ -396,31 +443,95 @@ class App:
         write_config(self.cfg)
         messagebox.showinfo("저장 완료", f"API 키를 {USER_CONFIG.name}에 저장했습니다.")
 
-    def configure_lms(self):
-        current = self.cfg.get("solapi", {})
-        api_key = simpledialog.askstring("SOLAPI 설정", "API Key:", initialvalue=current.get("api_key", ""), show="*", parent=self.root)
-        if api_key is None:
+    def configure_kakao(self):
+        current = self.cfg.get("kakao", {})
+        rest_api_key = simpledialog.askstring("카카오 연결", "카카오디벨로퍼스 REST API 키를 입력하세요.",
+            initialvalue=current.get("client_id", ""), parent=self.root)
+        if rest_api_key is None:
             return
-        api_secret = simpledialog.askstring("SOLAPI 설정", "API Secret:", show="*", parent=self.root)
-        if api_secret is None:
+        client_secret = simpledialog.askstring("카카오 연결", "카카오디벨로퍼스 Client Secret을 입력하세요.\n"
+            "Client Secret을 사용하지 않도록 설정한 앱이면 비워 두세요.",
+            initialvalue=current.get("client_secret", ""), show="*", parent=self.root)
+        if client_secret is None:
             return
-        sender = simpledialog.askstring("SOLAPI 설정", "등록된 발신번호:", initialvalue=current.get("sender", ""), parent=self.root)
-        if sender is None:
-            return
-        recipient = simpledialog.askstring("SOLAPI 설정", "수신 휴대전화 번호:", initialvalue=current.get("recipient", ""), parent=self.root)
-        if recipient is None:
-            return
-        self.cfg["solapi"] = {"api_key": api_key.strip(), "api_secret": api_secret.strip(),
-                              "sender": sender.strip(), "recipient": recipient.strip()}
-        self.cfg.setdefault("notification", {})["provider"] = "solapi_lms"
+        self.cfg["kakao"] = {**current, "client_id": rest_api_key.strip(),
+                             "client_secret": client_secret.strip()}
         write_config(self.cfg)
-        messagebox.showinfo("저장 완료", f"SOLAPI 설정을 {USER_CONFIG.name}에 저장했습니다.")
+        messagebox.showinfo("카카오 연결 준비", "카카오디벨로퍼스 앱 설정에 다음 항목을 등록했는지 확인하세요.\n\n"
+            "리다이렉트 URI: http://127.0.0.1:8765/oauth\n"
+            "동의 항목: talk_message\n"
+            "제품 링크 도메인: https://developers.kakao.com\n\n"
+            "확인을 누르면 카카오 로그인 창이 열립니다.")
+        self.busy = True
+        self.send_button.configure(state="disabled")
+        threading.Thread(target=self._kakao_auth_worker,
+                         args=(rest_api_key.strip(), client_secret.strip()), daemon=True).start()
+
+    def _kakao_auth_worker(self, rest_api_key, client_secret):
+        try:
+            tokens, error = authorize_kakao(rest_api_key, client_secret), None
+        except Exception as exc:
+            error = str(exc)
+            if "KOE004" in error:
+                error = ("카카오 로그인이 꺼져 있습니다. 카카오디벨로퍼스에서 앱 > "
+                         "카카오 로그인 > 사용 설정을 ON으로 바꾼 뒤 다시 연결하세요.")
+            tokens = {}
+        self.completion_queue.put(("kakao_auth", tokens, error))
 
     def save_shutdown_preference(self):
         self.cfg["shutdown_after_send"] = bool(self.shutdown_var.get())
         write_config(self.cfg)
 
+    def _send_kakao_report(self):
+        if not self.results:
+            messagebox.showinfo("카카오톡 보내기", "먼저 거래를 조회하세요.")
+            return
+        if not (self.cfg.get("kakao", {}).get("refresh_token") or
+                self.cfg.get("kakao", {}).get("access_token")):
+            messagebox.showinfo("카카오 연결 필요", "먼저 '카카오 설정'을 눌러 카카오 계정을 연결하세요.")
+            return
+        try:
+            messages = make_kakao_messages(
+                self.results, queried_on=self.result_date, months=3)
+        except MessageSendError as exc:
+            messagebox.showerror("카카오 메시지 오류", str(exc))
+            return
+        prompt = (f"내 카카오톡 '나와의 채팅'으로 {len(messages)}건을 보냅니다.\n"
+                  "계속할까요?")
+        if not messagebox.askyesno("카카오톡 보내기", prompt):
+            return
+        self.busy = True
+        self.send_button.configure(state="disabled")
+        self.status.set("카카오톡 전송 중…")
+        kakao_snapshot = dict(self.cfg["kakao"])
+        threading.Thread(target=self._kakao_send_worker,
+                         args=(messages, kakao_snapshot), daemon=True).start()
+
+    def _kakao_send_worker(self, messages, kakao_snapshot):
+        try:
+            result = send_kakao_memo(kakao_snapshot, messages,
+                on_tokens=lambda tokens: self.completion_queue.put(("kakao_tokens", tokens)))
+            error = None
+        except Exception as exc:
+            result, error = "", str(exc)
+        self.completion_queue.put(("kakao_send", result, error))
+
+    def _finish_kakao_send(self, result, error):
+        self.busy = False
+        self.send_button.configure(state="normal")
+        if error:
+            self.status.set("카카오톡 전송 실패")
+            messagebox.showerror("카카오톡 전송 실패", error)
+            return
+        self.status.set("카카오톡 전송 완료")
+        messagebox.showinfo("카카오톡 전송 완료",
+                            f"나와의 채팅방에 {result} 메시지를 보냈습니다.")
+        if self.shutdown_var.get():
+            self.schedule_shutdown()
+
     def send_report(self):
+        self._send_kakao_report()
+        return
         if not self.results:
             messagebox.showinfo("발송할 보고서 없음", "먼저 실거래를 조회하세요.")
             return
@@ -465,6 +576,25 @@ class App:
                 elif event[0] == "send":
                     _, group_id, error = event
                     self._finish_send(group_id, error)
+                elif event[0] == "kakao_tokens":
+                    self.cfg["kakao"] = event[1]
+                    write_config(self.cfg)
+                elif event[0] == "kakao_auth":
+                    _, tokens, error = event
+                    self.busy = False
+                    self.send_button.configure(state="normal")
+                    if error:
+                        self.status.set("카카오 연결 실패")
+                        messagebox.showerror("카카오 연결 실패", error)
+                    else:
+                        self.cfg["kakao"].update(tokens)
+                        self.cfg.setdefault("notification", {})["provider"] = "kakao_me"
+                        write_config(self.cfg)
+                        self.status.set("카카오 연결 완료")
+                        messagebox.showinfo("카카오 연결 완료", "이제 '카카오톡 전송'을 누르면 나와의 채팅방으로 거래 요약을 보냅니다.")
+                elif event[0] == "kakao_send":
+                    _, result, error = event
+                    self._finish_kakao_send(result, error)
         except queue.Empty:
             pass
         if self.root.winfo_exists():
@@ -533,6 +663,8 @@ class App:
             if not 1 <= n <= 24: raise ValueError()
         except (ValueError, tk.TclError):
             messagebox.showerror("입력 오류", "조회 개월은 1~24 사이 숫자여야 합니다."); return
+        n = max(3, n)
+        self.months.set(n)
         self.cfg["lookback_months"] = n; write_config(self.cfg)
         queried_on = date.today()
         apartments_snapshot = tuple(
