@@ -2,9 +2,8 @@
 
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import yaml
 from cryptography.fernet import Fernet, InvalidToken
@@ -59,7 +58,8 @@ def main():
         if not cfg.get("molit_service_key"):
             raise RuntimeError("The public data API key is not configured")
 
-        today = datetime.now(ZoneInfo("Asia/Seoul")).date()
+        korea_time = timezone(timedelta(hours=9))
+        today = datetime.now(korea_time).date()
         results = []
         for apartment in apartments:
             rows = app.fetch(apartment, 3, cfg["molit_service_key"], today=today)
